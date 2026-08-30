@@ -1,4 +1,4 @@
-import { applicationDefault, cert, getApps, initializeApp } from "firebase-admin/app";
+import { applicationDefault, cert, initializeApp } from "firebase-admin/app";
 import { getFirestore, type Firestore } from "firebase-admin/firestore";
 import type { Config } from "../config.ts";
 
@@ -27,10 +27,7 @@ export function createFirebaseService(config: Config) {
         );
       }
 
-      // initializeApp โยน error ถ้าเรียกซ้ำ — reuse app เดิมเวลา --watch รีสตาร์ท
-      const app =
-        getApps()[0] ??
-        initializeApp(
+      const app = initializeApp(
           hasInlineCredentials
             ? {
                 credential: cert({
