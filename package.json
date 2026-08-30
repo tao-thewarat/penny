@@ -1,0 +1,30 @@
+{
+  "name": "penny",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "dev": "node --watch --env-file-if-exists=.env src/index.ts",
+    "start": "node --env-file-if-exists=.env dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist",
+    "ask": "node --env-file-if-exists=.env src/scripts/ask.ts",
+    "parse": "node --env-file-if-exists=.env src/scripts/parse.ts",
+    "summary": "node --env-file-if-exists=.env src/scripts/summary.ts"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@google/genai": "^2.19.0",
+    "discord.js": "^14.27.0",
+    "firebase-admin": "^14.3.0"
+  }
+}
