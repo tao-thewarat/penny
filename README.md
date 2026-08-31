@@ -3,13 +3,19 @@
 A Discord bot that turns everyday chat messages into a personal expense log.
 
 Type `ก๋วยเตี๋ยว 60` in a channel and Penny reads it as a 60 THB food expense,
-categorises it, and writes it to Firestore. Ask `เดือนนี้ใช้ไปเท่าไหร่` and it
-answers with the real total from the database.
+categorises it, and writes it to Firestore. Drop in a photo of a receipt or a
+bank transfer slip and it reads the total off the picture instead. Ask
+`เดือนนี้ใช้ไปเท่าไหร่` and it answers with the real total from the database.
 
 ```
 you   ก๋วยเตี๋ยว 60
 penny 🍜 ก๋วยเตี๋ยว — 60 THB
          Food & Drink · 2026-08-30
+      _บันทึกแล้ว 1 รายการ_
+
+you   [7-eleven-slip.jpg]
+penny 🛒 7-Eleven — 128 THB (ref 0043 · นม, ขนมปัง)
+         Groceries · 2026-08-30
       _บันทึกแล้ว 1 รายการ_
 
 you   เดือนนี้ใช้ไปเท่าไหร่
@@ -36,9 +42,15 @@ into `2026-08-01 → 2026-08-31` — and the application sums the amounts itself
 An LLM that quietly adds wrong is far worse than one that fails loudly, so
 totals stay in code where they can be tested.
 
+Images ride along the same call. Attachments Gemini can read (png, jpeg, webp,
+heic/heif — up to 4 per message, 8 MB each) are downloaded from Discord and sent
+inline with the message, and the prompt gains a block of receipt rules: take the
+printed grand total rather than summing lines, read the slip's own date, convert
+Buddhist years. Anything the user types alongside the image wins over the image.
+
 The model is also not connected to the database. It cannot read Firestore; it
-only ever sees the message text and returns structured JSON, constrained by a
-response schema. Every field is re-validated before it reaches the rest of the
+only ever sees the message text and any attached pictures, and returns
+structured JSON, constrained by a response schema. Every field is re-validated before it reaches the rest of the
 app, because a schema constrains the model without guaranteeing it.
 
 ## Layout
@@ -152,6 +164,8 @@ but says it could not save them.
 
 ```bash
 yarn parse "เมื่อวานแท็กซี่ไปสนามบิน 350 กับกาแฟ 85"
+yarn parse ./slip.jpg                 # image only
+yarn parse "จ่ายค่าข้าว" ./slip.jpg    # text + image
 yarn summary <discord-user-id> "เดือนนี้ใช้ไปเท่าไหร่"
 yarn ask "สวัสดี ทำอะไรได้บ้าง"
 ```
@@ -174,6 +188,7 @@ One Firestore document per expense, in the `expenses` collection:
   occurredAt: string    // "2026-08-30", a plain string so ranges sort lexicographically
   confidence: number    // 0–1, from the model
   sourceText: string    // the original message, kept so a bad parse can be re-read
+                        // image-only messages are stored as "[รูปภาพ N รูป]"
   createdAt: string
 }
 ```

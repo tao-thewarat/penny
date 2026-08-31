@@ -1,4 +1,10 @@
-import { GoogleGenAI, ThinkingLevel, Type, type Schema } from "@google/genai";
+import {
+  GoogleGenAI,
+  ThinkingLevel,
+  Type,
+  type Part,
+  type Schema,
+} from "@google/genai";
 import type { Config } from "../config.ts";
 import {
   EXPENSE_CATEGORIES,
@@ -20,7 +26,7 @@ const CATEGORY_GUIDE = EXPENSE_CATEGORIES.map(
   (category) => `- ${category.id}: ${category.hint}`,
 ).join("\n");
 
-function buildInterpretInstruction(today: string): string {
+function buildInterpretInstruction(today: string, hasImages: boolean): string {
   return [
     "You route short chat messages for a personal expense tracker. Messages are Thai or English.",
     "",
@@ -31,6 +37,7 @@ function buildInterpretInstruction(today: string): string {
     "",
     `Today is ${today} (Asia/Bangkok).`,
     "",
+    ...(hasImages ? IMAGE_GUIDE : []),
     "For log_expense:",
     "- One message may contain several expenses; return one entry per item.",
     "- Keep `item` in the user's own words, trimmed, without the amount.",
@@ -51,6 +58,25 @@ function buildInterpretInstruction(today: string): string {
     CATEGORY_GUIDE,
   ].join("\n");
 }
+
+/**
+ * Extra rules that only apply when the user attached pictures — receipt photos,
+ * bank transfer slips, or screenshots of an order summary.
+ */
+const IMAGE_GUIDE = [
+  "The user attached one or more images: receipts, bank transfer slips, or screenshots of a bill.",
+  "- Read every image. Treat each one as its own expense unless the text says otherwise.",
+  "- Take the grand total actually paid (net/รวมทั้งสิ้น/ยอดชำระ), not the subtotal, and not the change or the cash tendered.",
+  "- Ignore VAT/service lines that are already part of that total; never sum the line items yourself when a total is printed.",
+  "- `item` is the merchant or shop name from the slip. Fall back to what was bought when there is no name.",
+  "- Read the date printed on the slip and output it as `occurredAt`. Thai Buddhist years (2560+) are CE + 543 — subtract it. Use today only when no date is readable.",
+  "- Put the reference/transaction number, or a short list of what was bought, into `note`.",
+  "- A transfer slip with a recipient name is still an expense: categorise it from the recipient, otherwise `fees_and_charges`.",
+  "- Use confidence below 0.6 when the image is blurry, cropped, or the total is ambiguous.",
+  "- Any text the user typed alongside the image wins over what the image says.",
+  "- If an image shows no amount at all, pick intent `chat` and say so in `reason`.",
+  "",
+];
 
 const INTERPRET_SCHEMA: Schema = {
   type: Type.OBJECT,
@@ -119,6 +145,27 @@ const INTERPRET_SCHEMA: Schema = {
   propertyOrdering: ["intent", "reason", "expenses", "query"],
 };
 
+/** One picture handed to Gemini inline, already base64-encoded. */
+export type ImageInput = {
+  /** e.g. "image/jpeg" — must be a type Gemini accepts. */
+  mimeType: string;
+  data: string;
+};
+
+/**
+ * Images go first: the model reads them before the prompt that explains what
+ * to do with them.
+ */
+function toParts(text: string, images: readonly ImageInput[]): Part[] {
+  const parts: Part[] = images.map((image) => ({
+    inlineData: { mimeType: image.mimeType, data: image.data },
+  }));
+  if (text) {
+    parts.push({ text });
+  }
+  return parts;
+}
+
 export function createAiService(config: Config) {
   let client: GoogleGenAI | undefined;
 
@@ -139,11 +186,11 @@ export function createAiService(config: Config) {
       return config.geminiModel;
     },
 
-    /** Free-form chat reply. */
-    async ask(prompt: string): Promise<string> {
+    /** Free-form chat reply, optionally about the attached images. */
+    async ask(prompt: string, images: readonly ImageInput[] = []): Promise<string> {
       const response = await getClient().models.generateContent({
         model: config.geminiModel,
-        contents: prompt,
+        contents: toParts(prompt, images),
         config: {
           systemInstruction: CHAT_INSTRUCTION,
           temperature: 0.7,
@@ -162,22 +209,24 @@ export function createAiService(config: Config) {
 
     /**
      * Decides what one message wants: log an expense, ask about past spending,
-     * or just chat. Reads nothing and writes nothing — the caller owns the data.
+     * or just chat. Attached images (receipts, transfer slips) are read as part
+     * of the same message. Reads nothing and writes nothing — the caller owns
+     * the data.
      */
     async interpret(
       message: string,
+      images: readonly ImageInput[] = [],
       now: Date = new Date(),
     ): Promise<Interpretation> {
       const today = toIsoDate(now, config.timezone);
 
       const response = await getClient().models.generateContent({
         model: config.geminiModel,
-        contents: message,
+        contents: toParts(message, images),
         config: {
-          systemInstruction: buildInterpretInstruction(today),
-          // งานสกัดข้อมูล ต้องการความคงเส้นคงวามากกว่าความสร้างสรรค์
+          systemInstruction: buildInterpretInstruction(today, images.length > 0),
           temperature: 0,
-          maxOutputTokens: 800,
+          maxOutputTokens: 2000,
           thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
           responseMimeType: "application/json",
           responseSchema: INTERPRET_SCHEMA,
@@ -274,7 +323,6 @@ function normaliseQuery(entry: unknown, today: string): ExpenseQuery | undefined
   const label = record["label"];
 
   return {
-    // สลับให้ถูกทางเผื่อโมเดลใส่กลับด้าน
     from: from <= to ? from : to,
     to: from <= to ? to : from,
     category: toCategory(record["category"]) ?? null,
