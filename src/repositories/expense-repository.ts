@@ -1,4 +1,8 @@
-import type { CollectionReference, Query } from "firebase-admin/firestore";
+import type {
+  CollectionReference,
+  DocumentData,
+  Query,
+} from "firebase-admin/firestore";
 import type { Config } from "../config.ts";
 import {
   isExpenseCategory,
@@ -69,21 +73,13 @@ export function createExpenseRepository(
       query: ExpenseQuery,
       userId: string,
     ): Promise<ExpenseSummary> {
-      let firestoreQuery: Query = collection()
-        .where("userId", "==", userId)
-        .where("occurredAt", ">=", query.from)
-        .where("occurredAt", "<=", query.to);
+      const documents = await readForSummary(collection(), query, userId);
 
-      if (query.category) {
-        firestoreQuery = firestoreQuery.where("category", "==", query.category);
-      }
-
-      const snapshot = await firestoreQuery.get();
       const totals = new Map<ExpenseCategory, CategoryTotal>();
       let total = 0;
+      let count = 0;
 
-      for (const document of snapshot.docs) {
-        const data = document.data();
+      for (const data of documents) {
         const amount = Number(data["amount"]);
         if (!Number.isFinite(amount)) continue;
 
@@ -94,6 +90,7 @@ export function createExpenseRepository(
             : "other";
 
         total += amount;
+        count += 1;
         const current = totals.get(category);
         if (current) {
           current.total += amount;
@@ -106,12 +103,76 @@ export function createExpenseRepository(
       return {
         query,
         total,
-        count: snapshot.size,
+        count,
         currency: "THB",
         byCategory: [...totals.values()].sort((a, b) => b.total - a.total),
       };
     },
   };
+}
+
+/** Firestore's FAILED_PRECONDITION, which is how a missing index arrives. */
+const FAILED_PRECONDITION = 9;
+
+let warnedAboutIndex = false;
+
+/**
+ * The narrow query needs a composite index (see firestore.indexes.json). A
+ * fresh project has none, and Firestore then rejects every summary rather than
+ * answering slowly — which read as "the bot is broken" to the user.
+ *
+ * So a missing index falls back to an equality-only query, which Firestore
+ * serves from the automatic single-field indexes, and the range is applied
+ * here. It reads that one user's whole history, so it is a stopgap, not the
+ * plan: `yarn indexes` restores the indexed path.
+ */
+async function readForSummary(
+  expenses: CollectionReference,
+  query: ExpenseQuery,
+  userId: string,
+): Promise<DocumentData[]> {
+  let indexed: Query = expenses
+    .where("userId", "==", userId)
+    .where("occurredAt", ">=", query.from)
+    .where("occurredAt", "<=", query.to);
+
+  if (query.category) {
+    indexed = indexed.where("category", "==", query.category);
+  }
+
+  try {
+    return (await indexed.get()).docs.map((document) => document.data());
+  } catch (err: unknown) {
+    if (!isMissingIndex(err)) throw err;
+
+    if (!warnedAboutIndex) {
+      warnedAboutIndex = true;
+      console.warn(
+        "Firestore has no composite index for the summary query, falling back to a full per-user read. Run `yarn indexes` to fix it.",
+      );
+    }
+
+    const snapshot = await expenses.where("userId", "==", userId).get();
+
+    return snapshot.docs
+      .map((document) => document.data())
+      .filter((data) => {
+        const occurredAt = data["occurredAt"];
+        if (typeof occurredAt !== "string") return false;
+        if (occurredAt < query.from || occurredAt > query.to) return false;
+        return !query.category || data["category"] === query.category;
+      });
+  }
+}
+
+function isMissingIndex(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const record = err as { code?: unknown; message?: unknown };
+  return (
+    record.code === FAILED_PRECONDITION &&
+    typeof record.message === "string" &&
+    record.message.includes("index")
+  );
 }
 
 export type ExpenseRepository = ReturnType<typeof createExpenseRepository>;

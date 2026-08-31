@@ -127,15 +127,24 @@ FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIEv...\n-----END PRIVATE KE
 
 ### Firestore indexes
 
-Range queries need composite indexes. Deploy them once:
+Summary queries filter on `userId` and a date range at once, which Firestore
+serves from a composite index. Create the ones in `firestore.indexes.json` with
+the service account you already configured:
 
 ```bash
-npx firebase-tools deploy --only firestore:indexes
+yarn indexes
 ```
 
-Or let the first query fail and follow the console link in the error — Firestore
-generates a one-click creation URL. Indexes take a minute or two to build.
-Logging expenses works without them; only the summary queries need them.
+If that returns `PERMISSION_DENIED`, the service account needs the **Cloud
+Datastore Index Admin** role (`roles/datastore.indexAdmin`) — the command
+prints the IAM link. The Firebase CLI
+(`npx firebase-tools deploy --only firestore:indexes`) and the one-click link in
+the console both work too. Indexes take a minute or two to build.
+
+**Summaries answer either way.** Without an index the app falls back to reading
+that one user's expenses and filtering the range in code, and logs a warning.
+That is a stopgap for a fresh project, not the plan — it reads the user's whole
+history on every question, so create the indexes once the bot is real.
 
 ## Running
 
@@ -144,6 +153,7 @@ yarn dev        # watch mode, runs src/ directly
 yarn build      # compile to dist/
 yarn start      # run the compiled build
 yarn typecheck
+yarn indexes    # create the Firestore composite indexes
 ```
 
 On startup Penny prints which integrations are live, so a missing key is
