@@ -1,4 +1,11 @@
-import { Client, Events, GatewayIntentBits, type Message } from "discord.js";
+import { Buffer } from "node:buffer";
+import {
+  Client,
+  Events,
+  GatewayIntentBits,
+  type Attachment,
+  type Message,
+} from "discord.js";
 import type { Config } from "../config.ts";
 import {
   getExpenseCategory,
@@ -7,11 +14,23 @@ import {
   type ExpenseSummary,
 } from "../domain/index.ts";
 import type { ExpenseRepository } from "../repositories/expense-repository.ts";
-import type { AiService } from "./ai-service.ts";
+import type { AiService, ImageInput } from "./ai-service.ts";
 import type { FirebaseService } from "./firebase-service.ts";
 
 const DISCORD_MESSAGE_LIMIT = 2000;
 const LOW_CONFIDENCE = 0.6;
+
+/** Image types Gemini accepts inline. Anything else is ignored, not an error. */
+const SUPPORTED_IMAGE_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/heic",
+  "image/heif",
+]);
+/** One message rarely holds more slips than this, and each one costs tokens. */
+const MAX_IMAGES = 4;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
 export function createDiscordService(
   config: Config,
@@ -41,28 +60,37 @@ export function createDiscordService(
     if (msg.author.bot || msg.channelId !== config.discordChannelId) return;
 
     const content = msg.content.trim();
-    if (!content) return;
+    const attachments = pickImageAttachments(msg);
+    if (!content && attachments.length === 0) return;
 
     if (!ai.isEnabled()) {
       await msg.reply("ยังตอบไม่ได้ครับ ยังไม่ได้ตั้งค่า GEMINI_API_KEY");
       return;
     }
 
-    // ยิง typing indicator ค้างไว้ระหว่างรอ AI (Discord หมดอายุให้เองใน 10 วิ)
     if (msg.channel.isSendable()) {
       void msg.channel.sendTyping().catch(() => {});
     }
 
     try {
-      await reply(msg, await route(msg, content));
+      const images = await downloadImages(attachments);
+      if (attachments.length > 0 && images.length === 0) {
+        await reply(msg, "อ่านรูปไม่สำเร็จครับ ลองส่งใหม่อีกครั้งนะครับ");
+        return;
+      }
+      await reply(msg, await route(msg, content, images));
     } catch (err: unknown) {
       console.error("Failed to answer:", err);
       await reply(msg, "ขออภัยครับ ตอนนี้ทำรายการไม่สำเร็จ ลองใหม่อีกครั้งนะครับ");
     }
   }
 
-  async function route(msg: Message, content: string): Promise<string> {
-    const interpretation = await ai.interpret(content);
+  async function route(
+    msg: Message,
+    content: string,
+    images: ImageInput[],
+  ): Promise<string> {
+    const interpretation = await ai.interpret(content, images);
 
     switch (interpretation.intent) {
       case "log_expense": {
@@ -71,7 +99,7 @@ export function createDiscordService(
         }
         const saved = await expenses.saveMany(interpretation.expenses, {
           userId: msg.author.id,
-          sourceText: content,
+          sourceText: describeSource(content, images.length),
         });
         return formatSaved(saved);
       }
@@ -88,7 +116,7 @@ export function createDiscordService(
       }
 
       case "chat":
-        return ai.ask(content);
+        return ai.ask(content || "ผู้ใช้ส่งรูปมาโดยไม่มีข้อความ", images);
     }
   }
 
@@ -108,6 +136,61 @@ export function createDiscordService(
       await client.destroy();
     },
   };
+}
+
+/** Image attachments Gemini can read, oldest first, capped at MAX_IMAGES. */
+function pickImageAttachments(msg: Message): Attachment[] {
+  return [...msg.attachments.values()]
+    .filter(
+      (attachment) =>
+        SUPPORTED_IMAGE_TYPES.has(normaliseMimeType(attachment.contentType)) &&
+        attachment.size <= MAX_IMAGE_BYTES,
+    )
+    .slice(0, MAX_IMAGES);
+}
+
+/**
+ * Discord only hands out CDN urls, and Gemini needs the bytes, so each picture
+ * is fetched here. One failed download drops that image instead of the message.
+ */
+async function downloadImages(
+  attachments: readonly Attachment[],
+): Promise<ImageInput[]> {
+  const downloads = await Promise.all(
+    attachments.map(async (attachment) => {
+      try {
+        const response = await fetch(attachment.url);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const bytes = Buffer.from(await response.arrayBuffer());
+        if (bytes.byteLength === 0 || bytes.byteLength > MAX_IMAGE_BYTES) {
+          throw new Error(`unusable size: ${bytes.byteLength} bytes`);
+        }
+        return {
+          mimeType: normaliseMimeType(attachment.contentType),
+          data: bytes.toString("base64"),
+        };
+      } catch (err: unknown) {
+        console.error(`Failed to download ${attachment.url}:`, err);
+        return undefined;
+      }
+    }),
+  );
+
+  return downloads.filter((image): image is ImageInput => image !== undefined);
+}
+
+/** `contentType` arrives as e.g. "image/jpeg; charset=utf-8". */
+function normaliseMimeType(contentType: string | null): string {
+  return contentType?.split(";")[0]?.trim().toLowerCase() ?? "";
+}
+
+/** sourceText must stay readable when the message was pictures only. */
+function describeSource(content: string, imageCount: number): string {
+  if (imageCount === 0) return content;
+  const label = `[รูปภาพ ${imageCount} รูป]`;
+  return content ? `${content} ${label}` : label;
 }
 
 export function formatDrafts(drafts: ExpenseDraft[]): string {
