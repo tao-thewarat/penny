@@ -8,17 +8,24 @@ import {
 } from "discord.js";
 import type { Config } from "../config.ts";
 import {
-  getExpenseCategory,
-  type Expense,
-  type ExpenseDraft,
-  type ExpenseSummary,
+  getCategory,
+  type Entry,
+  type EntryDraft,
+  type EntrySummary,
+  type EntryTotals,
+  type EntryType,
 } from "../domain/index.ts";
-import type { ExpenseRepository } from "../repositories/expense-repository.ts";
+import type { EntryRepository } from "../repositories/entry-repository.ts";
 import type { AiService, ImageInput } from "./ai-service.ts";
 import type { FirebaseService } from "./firebase-service.ts";
 
 const DISCORD_MESSAGE_LIMIT = 2000;
 const LOW_CONFIDENCE = 0.6;
+
+const TYPE_LABEL: Record<EntryType, string> = {
+  expense: "รายจ่าย",
+  income: "รายรับ",
+};
 
 /** Image types Gemini accepts inline. Anything else is ignored, not an error. */
 const SUPPORTED_IMAGE_TYPES = new Set([
@@ -36,7 +43,7 @@ export function createDiscordService(
   config: Config,
   ai: AiService,
   firebase: FirebaseService,
-  expenses: ExpenseRepository,
+  entries: EntryRepository,
 ) {
   const client = new Client({
     intents: [
@@ -93,22 +100,22 @@ export function createDiscordService(
     const interpretation = await ai.interpret(content, images);
 
     switch (interpretation.intent) {
-      case "log_expense": {
+      case "log_entry": {
         if (!firebase.isEnabled()) {
-          return `${formatDrafts(interpretation.expenses)}\n\n_ยังไม่ได้บันทึก: Firebase ยังไม่ได้ตั้งค่า_`;
+          return `${formatDrafts(interpretation.entries)}\n\n_ยังไม่ได้บันทึก: Firebase ยังไม่ได้ตั้งค่า_`;
         }
-        const saved = await expenses.saveMany(interpretation.expenses, {
+        const saved = await entries.saveMany(interpretation.entries, {
           userId: msg.author.id,
           sourceText: describeSource(content, images.length),
         });
         return formatSaved(saved);
       }
 
-      case "query_expenses": {
+      case "query_entries": {
         if (!firebase.isEnabled()) {
           return "ดูยอดไม่ได้ครับ Firebase ยังไม่ได้ตั้งค่า";
         }
-        const summary = await expenses.summarise(
+        const summary = await entries.summarise(
           interpretation.query,
           msg.author.id,
         );
@@ -193,49 +200,100 @@ function describeSource(content: string, imageCount: number): string {
   return content ? `${content} ${label}` : label;
 }
 
-export function formatDrafts(drafts: ExpenseDraft[]): string {
+export function formatDrafts(drafts: EntryDraft[]): string {
   const lines = drafts.map((draft) => {
-    const category = getExpenseCategory(draft.category);
+    const category = getCategory(draft.category);
     const unsure = draft.confidence < LOW_CONFIDENCE ? " ❓" : "";
     const note = draft.note ? ` (${draft.note})` : "";
-    return `${category.emoji} **${draft.item}** — ${formatAmount(draft.amount)} ${draft.currency}${note}\n   ${category.label} · ${draft.occurredAt}${unsure}`;
+    return `${category.emoji} **${draft.item}** — ${formatSigned(draft.amount, draft.type)} ${draft.currency}${note}\n   ${category.label} · ${draft.occurredAt}${unsure}`;
   });
 
-  const total = drafts.reduce((sum, draft) => sum + draft.amount, 0);
-  const totalLine =
-    drafts.length > 1 ? `\n\nรวม **${formatAmount(total)} THB**` : "";
-
-  return `${lines.join("\n")}${totalLine}`;
+  return `${lines.join("\n")}${formatDraftTotals(drafts)}`;
 }
 
-export function formatSaved(saved: Expense[]): string {
+/**
+ * One entry speaks for itself. Several need a total, and a message that mixed
+ * income with spending needs both sides plus the net.
+ */
+function formatDraftTotals(drafts: EntryDraft[]): string {
+  if (drafts.length < 2) return "";
+
+  const income = sumOf(drafts, "income");
+  const expense = sumOf(drafts, "expense");
+
+  if (income === 0) return `\n\nรวมรายจ่าย **${formatAmount(expense)} THB**`;
+  if (expense === 0) return `\n\nรวมรายรับ **${formatAmount(income)} THB**`;
+
+  return [
+    "",
+    "",
+    `รายรับ **+${formatAmount(income)}** · รายจ่าย **-${formatAmount(expense)}** · สุทธิ **${formatNet(income - expense)} THB**`,
+  ].join("\n");
+}
+
+function sumOf(drafts: EntryDraft[], type: EntryType): number {
+  return drafts
+    .filter((draft) => draft.type === type)
+    .reduce((sum, draft) => sum + draft.amount, 0);
+}
+
+export function formatSaved(saved: Entry[]): string {
   return `${formatDrafts(saved)}\n\n_บันทึกแล้ว ${saved.length} รายการ_`;
 }
 
-export function formatSummary(summary: ExpenseSummary): string {
-  const { query } = summary;
-  const scope = query.category
-    ? `${getExpenseCategory(query.category).label} · ${query.label}`
-    : query.label;
-  const range = `${query.from} → ${query.to}`;
+export function formatSummary(summary: EntrySummary): string {
+  const { query, income, expense } = summary;
 
-  if (summary.count === 0) {
-    return `📊 ${scope} (${range})\nยังไม่มีรายการในช่วงนี้ครับ`;
+  const scope = query.category
+    ? `${getCategory(query.category).label} · ${query.label}`
+    : query.type
+      ? `${TYPE_LABEL[query.type]} · ${query.label}`
+      : query.label;
+  const header = `📊 ${scope} (${query.from} → ${query.to})`;
+
+  if (income.count === 0 && expense.count === 0) {
+    return `${header}\nยังไม่มีรายการในช่วงนี้ครับ`;
   }
 
-  const breakdown = summary.byCategory
-    .map((entry) => {
-      const category = getExpenseCategory(entry.category);
-      return `${category.emoji} ${category.label} — ${formatAmount(entry.total)} (${entry.count})`;
-    })
-    .join("\n");
+  // A question about one side only gets that side back, without a net line
+  // that would just restate it.
+  const showIncome = query.type !== "expense";
+  const showExpense = query.type !== "income";
 
-  return [
-    `📊 ${scope} (${range})`,
-    `รวม **${formatAmount(summary.total)} ${summary.currency}** จาก ${summary.count} รายการ`,
-    "",
-    breakdown,
-  ].join("\n");
+  const headline: string[] = [];
+  if (showIncome) {
+    headline.push(
+      `💰 รายรับ **${formatAmount(income.total)} ${summary.currency}** จาก ${income.count} รายการ`,
+    );
+  }
+  if (showExpense) {
+    headline.push(
+      `💸 รายจ่าย **${formatAmount(expense.total)} ${summary.currency}** จาก ${expense.count} รายการ`,
+    );
+  }
+  if (showIncome && showExpense) {
+    headline.push(
+      `🧮 คงเหลือ **${formatNet(summary.net)} ${summary.currency}**`,
+    );
+  }
+
+  const sections = [
+    ...(showIncome ? [formatBreakdown("รายรับ", income)] : []),
+    ...(showExpense ? [formatBreakdown("รายจ่าย", expense)] : []),
+  ].filter((section) => section !== "");
+
+  return [header, ...headline, "", ...sections].join("\n").trimEnd();
+}
+
+function formatBreakdown(title: string, totals: EntryTotals): string {
+  if (totals.count === 0) return "";
+
+  const lines = totals.byCategory.map((entry) => {
+    const category = getCategory(entry.category);
+    return `${category.emoji} ${category.label} — ${formatAmount(entry.total)} (${entry.count})`;
+  });
+
+  return `__${title}__\n${lines.join("\n")}\n`;
 }
 
 function formatAmount(amount: number): string {
@@ -243,6 +301,16 @@ function formatAmount(amount: number): string {
     minimumFractionDigits: 0,
     maximumFractionDigits: 2,
   });
+}
+
+/** Signed for a ledger line: income adds, an expense takes away. */
+function formatSigned(amount: number, type: EntryType): string {
+  return `${type === "income" ? "+" : "-"}${formatAmount(amount)}`;
+}
+
+/** A net figure keeps its own sign, including when it is exactly zero. */
+function formatNet(net: number): string {
+  return `${net < 0 ? "-" : "+"}${formatAmount(Math.abs(net))}`;
 }
 
 function truncate(text: string, limit: number): string {

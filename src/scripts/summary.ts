@@ -1,5 +1,5 @@
 import { config } from "../config.ts";
-import { createExpenseRepository } from "../repositories/expense-repository.ts";
+import { createEntryRepository } from "../repositories/entry-repository.ts";
 import { createAiService } from "../services/ai-service.ts";
 import { formatSummary } from "../services/discord-service.ts";
 import { createFirebaseService } from "../services/firebase-service.ts";
@@ -14,12 +14,12 @@ if (!userId || !question) {
 
 const ai = createAiService(config);
 const firebase = createFirebaseService(config);
-const expenses = createExpenseRepository(firebase, config);
+const entries = createEntryRepository(firebase, config);
 
 const interpretation = await ai.interpret(question);
-if (interpretation.intent !== "query_expenses") {
-  console.error(`ไม่ใช่คำถามเรื่องยอดใช้จ่าย (intent=${interpretation.intent})`);
+if (interpretation.intent !== "query_entries") {
+  console.error(`ไม่ใช่คำถามเรื่องยอดเงิน (intent=${interpretation.intent})`);
   process.exit(1);
 }
 
-console.log(formatSummary(await expenses.summarise(interpretation.query, userId)));
+console.log(formatSummary(await entries.summarise(interpretation.query, userId)));

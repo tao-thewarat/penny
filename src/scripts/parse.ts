@@ -40,6 +40,6 @@ const interpretation = await ai.interpret(message, images);
 
 console.log(JSON.stringify(interpretation, null, 2));
 
-if (interpretation.intent === "log_expense") {
-  console.log(`\n${formatDrafts(interpretation.expenses)}`);
+if (interpretation.intent === "log_entry") {
+  console.log(`\n${formatDrafts(interpretation.entries)}`);
 }

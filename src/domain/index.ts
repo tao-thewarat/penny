@@ -1,17 +1,28 @@
 export type {
   CategoryTotal,
   Currency,
-  Expense,
-  ExpenseDraft,
-  ExpenseQuery,
-  ExpenseSummary,
+  Entry,
+  EntryDraft,
+  EntryQuery,
+  EntrySummary,
+  EntryTotals,
+  EntryType,
   Interpretation,
-} from "./expense.ts";
+} from "./entry.ts";
 export {
+  categoriesFor,
+  ENTRY_CATEGORY_IDS,
   EXPENSE_CATEGORIES,
   EXPENSE_CATEGORY_IDS,
-  getExpenseCategory,
+  fallbackCategoryFor,
+  getCategory,
+  INCOME_CATEGORIES,
+  INCOME_CATEGORY_IDS,
+  isCategoryFor,
   isExpenseCategory,
+  isIncomeCategory,
+  type CategoryDefinition,
+  type EntryCategory,
   type ExpenseCategory,
-  type ExpenseCategoryDefinition,
-} from "./expense-category.ts";
+  type IncomeCategory,
+} from "./entry-category.ts";
