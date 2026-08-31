@@ -1,27 +1,40 @@
 # Penny
 
-A Discord bot that turns everyday chat messages into a personal expense log.
+A Discord bot that turns everyday chat messages into a personal money log —
+both what you spend and what you earn.
 
 Type `ก๋วยเตี๋ยว 60` in a channel and Penny reads it as a 60 THB food expense,
-categorises it, and writes it to Firestore. Drop in a photo of a receipt or a
-bank transfer slip and it reads the total off the picture instead. Ask
-`เดือนนี้ใช้ไปเท่าไหร่` and it answers with the real total from the database.
+categorises it, and writes it to Firestore. Type `เงินเดือน 30000` and it files
+that as salary income instead. Drop in a photo of a receipt or a bank transfer
+slip and it reads the total off the picture. Ask `เดือนนี้เหลือเท่าไหร่` and it
+answers with the real numbers from the database.
 
 ```
 you   ก๋วยเตี๋ยว 60
-penny 🍜 ก๋วยเตี๋ยว — 60 THB
+penny 🍜 ก๋วยเตี๋ยว — -60 THB
          Food & Drink · 2026-08-30
       _บันทึกแล้ว 1 รายการ_
 
+you   เงินเดือน 30000
+penny 💵 เงินเดือน — +30,000 THB
+         Salary · 2026-08-30
+      _บันทึกแล้ว 1 รายการ_
+
 you   [7-eleven-slip.jpg]
-penny 🛒 7-Eleven — 128 THB (ref 0043 · นม, ขนมปัง)
+penny 🛒 7-Eleven — -128 THB (ref 0043 · นม, ขนมปัง)
          Groceries · 2026-08-30
       _บันทึกแล้ว 1 รายการ_
 
-you   เดือนนี้ใช้ไปเท่าไหร่
+you   เดือนนี้เหลือเท่าไหร่
 penny 📊 เดือนนี้ (2026-08-01 → 2026-08-31)
-      รวม 495 THB จาก 3 รายการ
+      💰 รายรับ 30,000 THB จาก 1 รายการ
+      💸 รายจ่าย 495 THB จาก 3 รายการ
+      🧮 คงเหลือ +29,505 THB
 
+      __รายรับ__
+      💵 Salary — 30,000 (1)
+
+      __รายจ่าย__
       🚗 Transport — 350 (1)
       🍜 Food & Drink — 145 (2)
 ```
@@ -33,9 +46,18 @@ then the app does the rest:
 
 | Intent | What the model returns | What the app does |
 | --- | --- | --- |
-| `log_expense` | item, amount, category, date | writes the rows to Firestore |
-| `query_expenses` | an absolute `from`/`to` range | queries Firestore, sums in code |
+| `log_entry` | direction, item, amount, category, date | writes the rows to Firestore |
+| `query_entries` | an absolute `from`/`to` range, optional side | queries Firestore, sums in code |
 | `chat` | nothing | replies with a normal chat answer |
+
+Every entry carries a `type` of `expense` or `income`, and `amount` is always
+positive — the type is what carries the sign. The model picks the direction from
+the wording (`เงินเดือน`, `ได้โบนัส`, `เงินเข้า` are income; a bare *item +
+number* defaults to an expense), and each direction has its own category list,
+so an income row can never end up filed as `food_and_drink`.
+
+The `chat` branch writes nothing, and its prompt says so explicitly — otherwise
+the model happily answers *"บันทึกให้แล้ว"* for something it never saved.
 
 **The model never touches the arithmetic.** It resolves language — *"เดือนนี้"*
 into `2026-08-01 → 2026-08-31` — and the application sums the amounts itself.
@@ -60,14 +82,14 @@ src/
   index.ts                        composition root: wire, start, graceful shutdown
   config.ts                       all env access, in one place
   domain/
-    expense.ts                    Expense, ExpenseDraft, ExpenseQuery, ExpenseSummary
-    expense-category.ts           the category seed; ExpenseCategory derives from it
+    entry.ts                      Entry, EntryDraft, EntryQuery, EntrySummary, EntryType
+    entry-category.ts             the expense + income category seeds; the id unions derive from them
   services/
     ai-service.ts                 Gemini: interpret() and ask()
     discord-service.ts            client, intent routing, reply formatting
     firebase-service.ts           lazy Firestore init
   repositories/
-    expense-repository.ts         saveMany() and summarise()
+    entry-repository.ts           saveMany() and summarise()
   scripts/                        CLI helpers for testing without Discord
 ```
 
@@ -75,9 +97,9 @@ Services are plain factory functions that take their dependencies as arguments,
 wired together in `services/index.ts`. No DI framework, and every service can be
 constructed with a stub config in a test.
 
-Adding a category means adding one entry to `EXPENSE_CATEGORIES` — the
-TypeScript union, the AI response schema, and the display labels all derive
-from that array.
+Adding a category means adding one entry to `EXPENSE_CATEGORIES` or
+`INCOME_CATEGORIES` — the TypeScript unions, the AI response schema, and the
+display labels all derive from those arrays.
 
 ## Requirements
 
@@ -142,7 +164,7 @@ prints the IAM link. The Firebase CLI
 the console both work too. Indexes take a minute or two to build.
 
 **Summaries answer either way.** Without an index the app falls back to reading
-that one user's expenses and filtering the range in code, and logs a warning.
+that one user's entries and filtering the range in code, and logs a warning.
 That is a stopgap for a fresh project, not the plan — it reads the user's whole
 history on every question, so create the indexes once the bot is real.
 
@@ -176,7 +198,8 @@ but says it could not save them.
 yarn parse "เมื่อวานแท็กซี่ไปสนามบิน 350 กับกาแฟ 85"
 yarn parse ./slip.jpg                 # image only
 yarn parse "จ่ายค่าข้าว" ./slip.jpg    # text + image
-yarn summary <discord-user-id> "เดือนนี้ใช้ไปเท่าไหร่"
+yarn parse "เงินเดือน 30000"           # income
+yarn summary <discord-user-id> "เดือนนี้เหลือเท่าไหร่"
 yarn ask "สวัสดี ทำอะไรได้บ้าง"
 ```
 
@@ -185,15 +208,16 @@ which makes it the fastest way to check a prompt change.
 
 ## Data model
 
-One Firestore document per expense, in the `expenses` collection:
+One Firestore document per entry, in the `expenses` collection:
 
 ```ts
 {
   userId: string        // Discord user id
+  type: string          // "expense" | "income"
   item: string          // "ก๋วยเตี๋ยว"
-  amount: number        // 60
+  amount: number        // 60 — always positive, `type` carries the direction
   currency: "THB"
-  category: string      // "food_and_drink"
+  category: string      // "food_and_drink" for expenses, "salary" for income
   note: string | null
   occurredAt: string    // "2026-08-30", a plain string so ranges sort lexicographically
   confidence: number    // 0–1, from the model
@@ -202,3 +226,8 @@ One Firestore document per expense, in the `expenses` collection:
   createdAt: string
 }
 ```
+
+Documents written before income support have no `type` field; they are read
+back as expenses, so no backfill is needed. The collection is still named
+`expenses` (override with `FIRESTORE_COLLECTION`) so existing data keeps
+working.
