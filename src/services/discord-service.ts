@@ -11,21 +11,16 @@ import {
   getCategory,
   type Entry,
   type EntryDraft,
-  type EntrySummary,
-  type EntryTotals,
   type EntryType,
 } from "../domain/index.ts";
-import type { EntryRepository } from "../repositories/entry-repository.ts";
+import {
+  SaveEntriesError,
+  type EntryRepository,
+} from "../repositories/entry-repository.ts";
 import type { AiService, ImageInput } from "./ai-service.ts";
-import type { FirebaseService } from "./firebase-service.ts";
 
 const DISCORD_MESSAGE_LIMIT = 2000;
 const LOW_CONFIDENCE = 0.6;
-
-const TYPE_LABEL: Record<EntryType, string> = {
-  expense: "รายจ่าย",
-  income: "รายรับ",
-};
 
 /** Image types Gemini accepts inline. Anything else is ignored, not an error. */
 const SUPPORTED_IMAGE_TYPES = new Set([
@@ -42,9 +37,10 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 export function createDiscordService(
   config: Config,
   ai: AiService,
-  firebase: FirebaseService,
   entries: EntryRepository,
 ) {
+  const portalUrl = new URL("/transactions/", config.transactionsApiUrl).href;
+
   const client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
@@ -101,26 +97,28 @@ export function createDiscordService(
 
     switch (interpretation.intent) {
       case "log_entry": {
-        if (!firebase.isEnabled()) {
-          return `${formatDrafts(interpretation.entries)}\n\n_ยังไม่ได้บันทึก: Firebase ยังไม่ได้ตั้งค่า_`;
+        try {
+          const saved = await entries.saveMany(interpretation.entries, {
+            userId: msg.author.id,
+            sourceText: describeSource(content, images.length),
+          });
+          return formatSaved(saved);
+        } catch (err: unknown) {
+          // Nothing saved is an ordinary failure; a partial save must be
+          // reported, or a retry would log the saved ones twice.
+          if (!(err instanceof SaveEntriesError) || err.saved.length === 0) {
+            throw err;
+          }
+          console.error("Partially saved entries:", err);
+          return formatPartial(err.saved, interpretation.entries.length);
         }
-        const saved = await entries.saveMany(interpretation.entries, {
-          userId: msg.author.id,
-          sourceText: describeSource(content, images.length),
-        });
-        return formatSaved(saved);
       }
 
-      case "query_entries": {
-        if (!firebase.isEnabled()) {
-          return "ดูยอดไม่ได้ครับ Firebase ยังไม่ได้ตั้งค่า";
-        }
-        const summary = await entries.summarise(
-          interpretation.query,
-          msg.author.id,
-        );
-        return formatSummary(summary);
-      }
+      // Summaries moved to portal-penny; the bot no longer reads any data.
+      // The intent is still detected so the model does not answer with totals
+      // it would have to invent.
+      case "query_entries":
+        return `ดูสรุปรายรับรายจ่ายได้ที่ ${portalUrl} ครับ`;
 
       case "chat":
         return ai.ask(content || "ผู้ใช้ส่งรูปมาโดยไม่มีข้อความ", images);
@@ -241,59 +239,12 @@ export function formatSaved(saved: Entry[]): string {
   return `${formatDrafts(saved)}\n\n_บันทึกแล้ว ${saved.length} รายการ_`;
 }
 
-export function formatSummary(summary: EntrySummary): string {
-  const { query, income, expense } = summary;
-
-  const scope = query.category
-    ? `${getCategory(query.category).label} · ${query.label}`
-    : query.type
-      ? `${TYPE_LABEL[query.type]} · ${query.label}`
-      : query.label;
-  const header = `📊 ${scope} (${query.from} → ${query.to})`;
-
-  if (income.count === 0 && expense.count === 0) {
-    return `${header}\nยังไม่มีรายการในช่วงนี้ครับ`;
-  }
-
-  // A question about one side only gets that side back, without a net line
-  // that would just restate it.
-  const showIncome = query.type !== "expense";
-  const showExpense = query.type !== "income";
-
-  const headline: string[] = [];
-  if (showIncome) {
-    headline.push(
-      `💰 รายรับ **${formatAmount(income.total)} ${summary.currency}** จาก ${income.count} รายการ`,
-    );
-  }
-  if (showExpense) {
-    headline.push(
-      `💸 รายจ่าย **${formatAmount(expense.total)} ${summary.currency}** จาก ${expense.count} รายการ`,
-    );
-  }
-  if (showIncome && showExpense) {
-    headline.push(
-      `🧮 คงเหลือ **${formatNet(summary.net)} ${summary.currency}**`,
-    );
-  }
-
-  const sections = [
-    ...(showIncome ? [formatBreakdown("รายรับ", income)] : []),
-    ...(showExpense ? [formatBreakdown("รายจ่าย", expense)] : []),
-  ].filter((section) => section !== "");
-
-  return [header, ...headline, "", ...sections].join("\n").trimEnd();
-}
-
-function formatBreakdown(title: string, totals: EntryTotals): string {
-  if (totals.count === 0) return "";
-
-  const lines = totals.byCategory.map((entry) => {
-    const category = getCategory(entry.category);
-    return `${category.emoji} ${category.label} — ${formatAmount(entry.total)} (${entry.count})`;
-  });
-
-  return `__${title}__\n${lines.join("\n")}\n`;
+function formatPartial(saved: Entry[], attempted: number): string {
+  return [
+    formatDrafts(saved),
+    "",
+    `_บันทึกได้ ${saved.length} จาก ${attempted} รายการ ที่เหลือบันทึกไม่สำเร็จ — ส่งเฉพาะรายการที่ขาดมาใหม่นะครับ_`,
+  ].join("\n");
 }
 
 function formatAmount(amount: number): string {

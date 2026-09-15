@@ -10,11 +10,10 @@ async function main(): Promise<void> {
       ? `AI enabled: ${services.ai.model}`
       : "AI disabled: GEMINI_API_KEY is not set",
   );
-  console.log(
-    services.firebase.isEnabled()
-      ? `Firestore enabled: collection "${config.firestoreCollection}"`
-      : "Firestore disabled: FIREBASE_* credentials are not set",
-  );
+  console.log(`Transactions API: ${config.transactionsApiUrl}`);
+  if (!config.transactionsApiToken) {
+    console.warn("PENNY_API_TOKEN is not set: the portal will reject every save");
+  }
 
   await services.discord.start();
 

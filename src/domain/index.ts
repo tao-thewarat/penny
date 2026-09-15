@@ -1,11 +1,8 @@
 export type {
-  CategoryTotal,
   Currency,
   Entry,
   EntryDraft,
   EntryQuery,
-  EntrySummary,
-  EntryTotals,
   EntryType,
   Interpretation,
 } from "./entry.ts";
