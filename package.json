@@ -13,10 +13,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "clean": "rm -rf dist",
-    "indexes": "node --env-file-if-exists=.env src/scripts/indexes.ts",
     "ask": "node --env-file-if-exists=.env src/scripts/ask.ts",
-    "parse": "node --env-file-if-exists=.env src/scripts/parse.ts",
-    "summary": "node --env-file-if-exists=.env src/scripts/summary.ts"
+    "parse": "node --env-file-if-exists=.env src/scripts/parse.ts"
   },
   "license": "MIT",
   "devDependencies": {
@@ -25,7 +23,6 @@
   },
   "dependencies": {
     "@google/genai": "^2.19.0",
-    "discord.js": "^14.27.0",
-    "firebase-admin": "^14.3.0"
+    "discord.js": "^14.27.0"
   }
 }

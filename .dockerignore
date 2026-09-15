@@ -6,7 +6,4 @@ dist
 .env.*
 !.env.example
 *.log
-*-firebase-adminsdk-*.json
-serviceAccount*.json
 README.md
-firestore.indexes.json

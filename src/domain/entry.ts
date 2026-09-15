@@ -26,7 +26,7 @@ export type EntryDraft = {
   confidence: number;
 };
 
-/** A draft once it has been persisted. The database owns every added field. */
+/** A draft once portal-penny has stored it. The id comes back from the API. */
 export type Entry = EntryDraft & {
   id: string;
   /** Discord user id of whoever logged it. */
@@ -54,30 +54,4 @@ export type EntryQuery = {
   category: EntryCategory | null;
   /** How the user phrased the range, e.g. "เดือนนี้". Used when replying. */
   label: string;
-};
-
-export type CategoryTotal = {
-  category: EntryCategory;
-  total: number;
-  count: number;
-};
-
-/** One side of the ledger over the queried range. */
-export type EntryTotals = {
-  total: number;
-  count: number;
-  byCategory: CategoryTotal[];
-};
-
-/**
- * Totals are summed in code, never by the model — money must not depend on
- * an LLM doing arithmetic.
- */
-export type EntrySummary = {
-  query: EntryQuery;
-  currency: Currency;
-  income: EntryTotals;
-  expense: EntryTotals;
-  /** income.total − expense.total. Negative means overspending. */
-  net: number;
 };

@@ -25,6 +25,6 @@ COPY --from=builder /app/dist ./dist
 
 USER node
 
-# No EXPOSE: the bot dials out to Discord and Firestore, it serves nothing.
+# No EXPOSE: the bot dials out to Discord, Gemini and portal-penny, it serves nothing.
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "dist/index.js"]

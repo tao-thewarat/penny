@@ -1,49 +1,85 @@
-import type {
-  CollectionReference,
-  DocumentData,
-  Query,
-} from "firebase-admin/firestore";
 import type { Config } from "../config.ts";
-import {
-  isCategoryFor,
-  type CategoryTotal,
-  type Entry,
-  type EntryCategory,
-  type EntryDraft,
-  type EntryQuery,
-  type EntrySummary,
-  type EntryTotals,
-  type EntryType,
+import type {
+  Currency,
+  Entry,
+  EntryCategory,
+  EntryDraft,
+  EntryType,
 } from "../domain/index.ts";
-import type { FirebaseService } from "../services/firebase-service.ts";
 
-/** Exactly what one Firestore document holds. */
-type EntryDocument = {
-  userId: string;
-  /**
-   * Written since income support landed. Documents saved before that have no
-   * `type` at all and are read back as expenses — see `toEntryType`.
-   */
+/** Exactly what portal-penny's PaymentTransactionSerializer accepts. */
+type TransactionPayload = {
+  name: string;
+  user_id: string;
   type: EntryType;
-  item: string;
   /** Always positive; `type` carries the direction. */
   amount: number;
-  currency: "THB";
+  currency: Currency;
   category: EntryCategory;
   note: string | null;
-  /** YYYY-MM-DD — a plain string so range filters sort lexicographically. */
-  occurredAt: string;
+  /** YYYY-MM-DD */
+  occurred_at: string;
   confidence: number;
-  sourceText: string;
-  createdAt: string;
+  source_text: string;
+  created_at: string;
 };
 
-export function createEntryRepository(
-  firebase: FirebaseService,
-  config: Config,
-) {
-  function collection(): CollectionReference {
-    return firebase.firestore().collection(config.firestoreCollection);
+/** The id is the only field the portal adds that the bot does not already hold. */
+type TransactionResponse = {
+  success?: boolean;
+  data?: { id?: unknown };
+};
+
+const REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * The API creates one transaction per request, so a message with several
+ * entries can fail part-way. `saved` holds the ones that did go through, so the
+ * reply can say so instead of inviting a retry that duplicates them.
+ */
+export class SaveEntriesError extends Error {
+  readonly saved: Entry[];
+
+  constructor(message: string, saved: Entry[], options?: ErrorOptions) {
+    super(message, options);
+    this.name = "SaveEntriesError";
+    this.saved = saved;
+  }
+}
+
+export function createEntryRepository(config: Config) {
+  async function post(payload: TransactionPayload): Promise<string> {
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      accept: "application/json",
+    };
+    if (config.transactionsApiToken) {
+      headers["authorization"] = `Bearer ${config.transactionsApiToken}`;
+    }
+
+    const response = await fetch(config.transactionsApiUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      // Django answers an unauthenticated call with a 302 to its login page;
+      // following it would turn the failure into a confusing HTML 200.
+      redirect: "manual",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+
+    const body = await response.text();
+    if (response.status !== 201) {
+      throw new Error(
+        `POST ${config.transactionsApiUrl} returned HTTP ${response.status}: ${body.slice(0, 500)}`,
+      );
+    }
+
+    const parsed = parseResponse(body);
+    const id = parsed?.data?.id;
+    if (parsed?.success !== true || (typeof id !== "number" && typeof id !== "string")) {
+      throw new Error(`Unexpected response from ${config.transactionsApiUrl}: ${body.slice(0, 500)}`);
+    }
+    return String(id);
   }
 
   return {
@@ -51,175 +87,50 @@ export function createEntryRepository(
       drafts: EntryDraft[],
       meta: { userId: string; sourceText: string },
     ): Promise<Entry[]> {
-      const db = firebase.firestore();
-      const batch = db.batch();
       const createdAt = new Date().toISOString();
+      const saved: Entry[] = [];
 
-      const saved = drafts.map((draft) => {
-        const ref = collection().doc();
-        const document: EntryDocument = {
-          userId: meta.userId,
-          type: draft.type,
-          item: draft.item,
-          amount: draft.amount,
-          currency: draft.currency,
-          category: draft.category,
-          note: draft.note,
-          occurredAt: draft.occurredAt,
-          confidence: draft.confidence,
-          sourceText: meta.sourceText,
-          createdAt,
-        };
-        batch.set(ref, document);
-        return { id: ref.id, ...document };
-      });
-
-      await batch.commit();
-      return saved;
-    },
-
-    async summarise(
-      query: EntryQuery,
-      userId: string,
-    ): Promise<EntrySummary> {
-      const documents = await readForSummary(collection(), query, userId);
-
-      const income = createTally();
-      const expense = createTally();
-
-      for (const data of documents) {
-        const amount = Math.abs(Number(data["amount"]));
-        if (!Number.isFinite(amount)) continue;
-
-        const type = toEntryType(data["type"]);
-        // The type filter is applied here rather than in Firestore so that no
-        // extra composite index is needed — see readForSummary.
-        if (query.type && type !== query.type) continue;
-
-        add(type === "income" ? income : expense, toCategory(data["category"], type), amount);
+      // One at a time, so a failure leaves a known prefix saved rather than an
+      // unknown subset.
+      for (const draft of drafts) {
+        try {
+          const id = await post({
+            name: draft.item,
+            user_id: meta.userId,
+            type: draft.type,
+            amount: draft.amount,
+            currency: draft.currency,
+            category: draft.category,
+            note: draft.note,
+            occurred_at: draft.occurredAt,
+            confidence: draft.confidence,
+            source_text: meta.sourceText,
+            created_at: createdAt,
+          });
+          saved.push({ ...draft, id, userId: meta.userId, sourceText: meta.sourceText, createdAt });
+        } catch (err: unknown) {
+          throw new SaveEntriesError(
+            `Saved ${saved.length} of ${drafts.length} entries`,
+            saved,
+            { cause: err },
+          );
+        }
       }
 
-      return {
-        query,
-        currency: "THB",
-        income: toTotals(income),
-        expense: toTotals(expense),
-        net: income.total - expense.total,
-      };
+      return saved;
     },
   };
 }
 
-type Tally = {
-  total: number;
-  count: number;
-  byCategory: Map<EntryCategory, CategoryTotal>;
-};
-
-function createTally(): Tally {
-  return { total: 0, count: 0, byCategory: new Map() };
-}
-
-function add(tally: Tally, category: EntryCategory, amount: number): void {
-  tally.total += amount;
-  tally.count += 1;
-
-  const current = tally.byCategory.get(category);
-  if (current) {
-    current.total += amount;
-    current.count += 1;
-  } else {
-    tally.byCategory.set(category, { category, total: amount, count: 1 });
-  }
-}
-
-function toTotals(tally: Tally): EntryTotals {
-  return {
-    total: tally.total,
-    count: tally.count,
-    byCategory: [...tally.byCategory.values()].sort((a, b) => b.total - a.total),
-  };
-}
-
-/** Documents written before income support carry no `type`; they are expenses. */
-function toEntryType(value: unknown): EntryType {
-  return value === "income" ? "income" : "expense";
-}
-
-function toCategory(value: unknown, type: EntryType): EntryCategory {
-  return typeof value === "string" && isCategoryFor(value, type)
-    ? (value as EntryCategory)
-    : type === "income"
-      ? "other_income"
-      : "other";
-}
-
-/** Firestore's FAILED_PRECONDITION, which is how a missing index arrives. */
-const FAILED_PRECONDITION = 9;
-
-let warnedAboutIndex = false;
-
-/**
- * The narrow query needs a composite index (see firestore.indexes.json). A
- * fresh project has none, and Firestore then rejects every summary rather than
- * answering slowly — which read as "the bot is broken" to the user.
- *
- * So a missing index falls back to an equality-only query, which Firestore
- * serves from the automatic single-field indexes, and the range is applied
- * here. It reads that one user's whole history, so it is a stopgap, not the
- * plan: `yarn indexes` restores the indexed path.
- *
- * `query.type` is deliberately not pushed down — filtering it in memory keeps
- * the existing two indexes sufficient, and the range has already narrowed the
- * result set by then.
- */
-async function readForSummary(
-  entries: CollectionReference,
-  query: EntryQuery,
-  userId: string,
-): Promise<DocumentData[]> {
-  let indexed: Query = entries
-    .where("userId", "==", userId)
-    .where("occurredAt", ">=", query.from)
-    .where("occurredAt", "<=", query.to);
-
-  if (query.category) {
-    indexed = indexed.where("category", "==", query.category);
-  }
-
+function parseResponse(body: string): TransactionResponse | undefined {
   try {
-    return (await indexed.get()).docs.map((document) => document.data());
-  } catch (err: unknown) {
-    if (!isMissingIndex(err)) throw err;
-
-    if (!warnedAboutIndex) {
-      warnedAboutIndex = true;
-      console.warn(
-        "Firestore has no composite index for the summary query, falling back to a full per-user read. Run `yarn indexes` to fix it.",
-      );
-    }
-
-    const snapshot = await entries.where("userId", "==", userId).get();
-
-    return snapshot.docs
-      .map((document) => document.data())
-      .filter((data) => {
-        const occurredAt = data["occurredAt"];
-        if (typeof occurredAt !== "string") return false;
-        if (occurredAt < query.from || occurredAt > query.to) return false;
-        return !query.category || data["category"] === query.category;
-      });
+    const value: unknown = JSON.parse(body);
+    return typeof value === "object" && value !== null
+      ? (value as TransactionResponse)
+      : undefined;
+  } catch {
+    return undefined;
   }
-}
-
-function isMissingIndex(err: unknown): boolean {
-  if (typeof err !== "object" || err === null) return false;
-  const record = err as { code?: unknown; message?: unknown };
-  return (
-    record.code === FAILED_PRECONDITION &&
-    typeof record.message === "string" &&
-    record.message.includes("index")
-  );
 }
 
 export type EntryRepository = ReturnType<typeof createEntryRepository>;
