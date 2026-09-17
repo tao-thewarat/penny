@@ -102,10 +102,12 @@ display labels all derive from those arrays.
 
 ```bash
 yarn install
-cp .env.example .env
+cp .env.example .env.local   # local development: yarn dev, parse, ask
+cp .env.example .env         # yarn start and Docker
 ```
 
-Fill in `.env`:
+`yarn dev`, `yarn parse` and `yarn ask` read `.env.local`; `yarn start` reads
+`.env`. Both are gitignored. Fill in whichever you are running:
 
 | Variable | Where it comes from |
 | --- | --- |
@@ -143,9 +145,9 @@ docker run --add-host=host.docker.internal:host-gateway \
 ## Running
 
 ```bash
-yarn dev        # watch mode, runs src/ directly
+yarn dev        # watch mode, runs src/ directly, reads .env.local
 yarn build      # compile to dist/
-yarn start      # run the compiled build
+yarn start      # run the compiled build, reads .env
 yarn typecheck
 ```
 
